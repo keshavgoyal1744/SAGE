@@ -1,0 +1,17 @@
+---
+name: full-security-audit
+description: Run SentinelGraph policy audit, scanner validation, vulnerability triage, and remediation verification.
+slash-command: enabled
+---
+
+## Full Security Audit
+
+Runs the complete SentinelGraph security audit workflow:
+
+1. Repository policy audit.
+2. Scanner validation with the 15-payload SAST/secret suite.
+3. Vulnerability triage with P0-P3 prioritization.
+4. Remediation verification for tracked security issues.
+
+Every run can comment back on the triggering issue or merge request.
+

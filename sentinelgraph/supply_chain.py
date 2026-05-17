@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from .advisory import AdvisoryEngine
 from .graph import SecurityGraph
-from .models import PackageInput
+from .models import AdvisoryEnrichmentRequest, PackageInput
 from .utils import clamp, stable_id
 
 
@@ -16,6 +17,25 @@ class SupplyChainEngine:
     def analyze(self, item: PackageInput) -> Dict[str, object]:
         reasons: List[Dict[str, object]] = []
         score = 0.0
+        external_advisories: List[Dict[str, object]] = []
+        advisory_errors: List[str] = []
+        known_advisories = list(item.known_advisories)
+        if item.enrich_advisories and not known_advisories:
+            enrichment = AdvisoryEngine().enrich(
+                AdvisoryEnrichmentRequest(
+                    ecosystem=item.ecosystem,
+                    package=item.name,
+                    version=item.version,
+                    include_nvd=False,
+                )
+            )
+            external_advisories = enrichment.get("advisories", [])
+            advisory_errors = enrichment.get("errors", [])
+            known_advisories.extend(
+                str(advisory.get("id"))
+                for advisory in external_advisories
+                if advisory.get("id")
+            )
         if item.ownership_changed:
             score += 22
             reasons.append({"code": "ownership-change", "message": "Package ownership changed recently."})
@@ -34,8 +54,8 @@ class SupplyChainEngine:
         if item.days_since_last_release is not None and item.days_since_last_release > 730:
             score += 12
             reasons.append({"code": "abandoned", "message": "Package appears inactive before this release."})
-        if item.known_advisories:
-            score += 12 + (len(item.known_advisories) * 4)
+        if known_advisories:
+            score += 12 + (len(known_advisories) * 4)
             reasons.append({"code": "known-advisory", "message": "Known advisories are attached."})
         score = clamp(score)
         level = "low"
@@ -56,12 +76,16 @@ class SupplyChainEngine:
             trust_score=round(score, 2),
             trust_level=level,
             reasons=reasons,
-            metadata=item.metadata,
+            metadata={
+                **item.metadata,
+                "external_advisories": external_advisories,
+                "advisory_errors": advisory_errors,
+            },
         )
         if item.repo:
             repo_entity = self.graph.upsert_repo(item.repo)
             self.graph.link(repo_entity.id, dep_entity.id, "depends_on")
-        for advisory in item.known_advisories:
+        for advisory in known_advisories:
             cve = self.graph.entity("cve", advisory, id=stable_id("cve", advisory), advisory=advisory)
             self.graph.link(dep_entity.id, cve.id, "affected_by")
         return {
@@ -69,4 +93,6 @@ class SupplyChainEngine:
             "risk_score": round(score, 2),
             "risk_level": level,
             "reasons": reasons,
+            "advisories": external_advisories,
+            "advisory_errors": advisory_errors,
         }

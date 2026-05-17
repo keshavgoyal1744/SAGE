@@ -59,6 +59,34 @@ class ProviderError(RuntimeError):
     pass
 
 
+def request_with_retry(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    retries: int = 3,
+    backoff_seconds: float = 0.5,
+    **kwargs,
+) -> httpx.Response:
+    """Retry provider calls on transient failures and common rate-limit responses."""
+    last_response: httpx.Response | None = None
+    for attempt in range(retries):
+        response = client.request(method, url, **kwargs)
+        last_response = response
+        if response.status_code not in {429, 500, 502, 503, 504}:
+            return response
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                delay = min(30.0, float(retry_after))
+            except ValueError:
+                delay = backoff_seconds * (2 ** attempt)
+        else:
+            delay = backoff_seconds * (2 ** attempt)
+        time.sleep(delay)
+    return last_response
+
+
 class GitLabClient:
     def __init__(self, token: Optional[str] = None, base_url: str = "https://gitlab.com"):
         self.token = token
@@ -73,7 +101,9 @@ class GitLabClient:
         with httpx.Client(timeout=30.0, headers=headers) as client:
             while limit <= 0 or len(records) < limit:
                 remaining = 100 if limit <= 0 else min(100, limit - len(records))
-                response = client.get(
+                response = request_with_retry(
+                    client,
+                    "GET",
                     f"{self.base_url}/api/v4/projects/{project}/merge_requests",
                     params={"state": state, "per_page": remaining, "page": page},
                 )
@@ -106,15 +136,81 @@ class GitLabClient:
             response.raise_for_status()
             return response.json()
 
-    def create_issue(self, repo: str, title: str, body: str, labels: Optional[List[str]] = None) -> Dict[str, Any]:
+    def create_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        labels: Optional[List[str]] = None,
+        assignees: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         project = quote(repo, safe="")
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            payload: Dict[str, Any] = {"title": title, "description": body, "labels": ",".join(labels or [])}
+            assignee_ids = self._resolve_assignee_ids(client, assignees or [])
+            if assignee_ids:
+                payload["assignee_ids"] = assignee_ids
             response = client.post(
                 f"{self.base_url}/api/v4/projects/{project}/issues",
-                json={"title": title, "description": body, "labels": ",".join(labels or [])},
+                json=payload,
             )
             response.raise_for_status()
             return response.json()
+
+    def list_issues(
+        self,
+        repo: str,
+        labels: Optional[List[str]] = None,
+        state: str = "opened",
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        project = quote(repo, safe="")
+        params: Dict[str, Any] = {"state": state, "order_by": "updated_at", "sort": "desc"}
+        if labels:
+            params["labels"] = ",".join(labels)
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            return self._list_pages(
+                client,
+                f"{self.base_url}/api/v4/projects/{project}/issues",
+                params,
+                max_pages=max(1, (limit + 99) // 100),
+            )[:limit]
+
+    def comment_on_issue(self, repo: str, issue_id: str, body: str) -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = request_with_retry(
+                client,
+                "POST",
+                f"{self.base_url}/api/v4/projects/{project}/issues/{issue_id}/notes",
+                json={"body": body},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def close_issue(self, repo: str, issue_id: str) -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = request_with_retry(
+                client,
+                "PUT",
+                f"{self.base_url}/api/v4/projects/{project}/issues/{issue_id}",
+                json={"state_event": "close"},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def issue_linked_changes(self, repo: str, issue_id: str) -> List[Dict[str, Any]]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(
+                request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.base_url}/api/v4/projects/{project}/issues/{issue_id}/related_merge_requests",
+                )
+            )
+        return data if isinstance(data, list) else []
 
     def create_branch(self, repo: str, branch: str, ref: str = "main") -> Dict[str, Any]:
         project = quote(repo, safe="")
@@ -128,6 +224,20 @@ class GitLabClient:
             response.raise_for_status()
             return response.json()
 
+    def delete_branch(self, repo: str, branch: str) -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        encoded_branch = quote(branch, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = request_with_retry(
+                client,
+                "DELETE",
+                f"{self.base_url}/api/v4/projects/{project}/repository/branches/{encoded_branch}",
+            )
+            if response.status_code == 404:
+                return {"branch": branch, "already_absent": True}
+            response.raise_for_status()
+            return {"branch": branch, "deleted": True}
+
     def commit_files(
         self,
         repo: str,
@@ -136,24 +246,25 @@ class GitLabClient:
         files: Dict[str, str],
     ) -> Dict[str, Any]:
         project = quote(repo, safe="")
-        actions = [
-            {"action": "update", "file_path": path, "content": content}
-            for path, content in files.items()
-        ]
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            actions = []
+            for path, content in files.items():
+                file_path = quote(path, safe="")
+                existing = client.get(
+                    f"{self.base_url}/api/v4/projects/{project}/repository/files/{file_path}",
+                    params={"ref": branch},
+                )
+                actions.append(
+                    {
+                        "action": "update" if existing.status_code == 200 else "create",
+                        "file_path": path,
+                        "content": content,
+                    }
+                )
             response = client.post(
                 f"{self.base_url}/api/v4/projects/{project}/repository/commits",
                 json={"branch": branch, "commit_message": message, "actions": actions},
             )
-            if response.status_code == 400 and "does not exist" in response.text.lower():
-                actions = [
-                    {"action": "create", "file_path": path, "content": content}
-                    for path, content in files.items()
-                ]
-                response = client.post(
-                    f"{self.base_url}/api/v4/projects/{project}/repository/commits",
-                    json={"branch": branch, "commit_message": message, "actions": actions},
-                )
             response.raise_for_status()
             return response.json()
 
@@ -171,6 +282,33 @@ class GitLabClient:
             )
             response.raise_for_status()
             return response.json()
+
+    def sync_wiki_pages(self, repo: str, pages: Dict[str, str]) -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        synced = []
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            for filename, content in pages.items():
+                title = filename.rsplit(".", 1)[0]
+                slug = quote(title, safe="")
+                existing = client.get(f"{self.base_url}/api/v4/projects/{project}/wikis/{slug}")
+                payload = {"title": title, "content": content, "format": "markdown"}
+                if existing.status_code == 200:
+                    response = request_with_retry(
+                        client,
+                        "PUT",
+                        f"{self.base_url}/api/v4/projects/{project}/wikis/{slug}",
+                        json=payload,
+                    )
+                else:
+                    response = request_with_retry(
+                        client,
+                        "POST",
+                        f"{self.base_url}/api/v4/projects/{project}/wikis",
+                        json=payload,
+                    )
+                response.raise_for_status()
+                synced.append(response.json())
+        return {"pages": len(synced), "target": "gitlab-wiki", "items": synced}
 
     def get_policy_status(self, repo: str, default_branch: str = "main") -> Dict[str, Any]:
         project = quote(repo, safe="")
@@ -269,8 +407,98 @@ class GitLabClient:
                     artifacts[f"gitlab-job-{job_id}-artifacts.zip"] = response.content
         return artifacts
 
+    def file_history(self, repo: str, path: str, ref: str = "main", limit: int = 20) -> List[Dict[str, Any]]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(
+                request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.base_url}/api/v4/projects/{project}/repository/commits",
+                    params={"ref_name": ref, "path": path, "per_page": min(limit, 100)},
+                )
+            )
+        return data if isinstance(data, list) else []
+
+    def file_blame(
+        self,
+        repo: str,
+        path: str,
+        ref: str = "main",
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        project = quote(repo, safe="")
+        file_path = quote(path, safe="")
+        params: Dict[str, Any] = {"ref": ref}
+        if start_line:
+            params["range[start]"] = start_line
+        if end_line:
+            params["range[end]"] = end_line
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(
+                request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.base_url}/api/v4/projects/{project}/repository/files/{file_path}/blame",
+                    params=params,
+                )
+            )
+        return data if isinstance(data, list) else []
+
+    def commit_diff(self, repo: str, commit_sha: str) -> List[Dict[str, Any]]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(
+                request_with_retry(client, "GET", f"{self.base_url}/api/v4/projects/{project}/repository/commits/{commit_sha}/diff")
+            )
+        return data if isinstance(data, list) else []
+
+    def merge_requests_for_commit(self, repo: str, commit_sha: str) -> List[Dict[str, Any]]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(
+                request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.base_url}/api/v4/projects/{project}/repository/commits/{commit_sha}/merge_requests",
+                )
+            )
+        return data if isinstance(data, list) else []
+
     def _headers(self) -> Dict[str, str]:
         return {"PRIVATE-TOKEN": self.token} if self.token else {}
+
+    def _resolve_assignee_ids(self, client: httpx.Client, assignees: List[str]) -> List[int]:
+        ids: List[int] = []
+        for assignee in assignees:
+            value = str(assignee or "").strip().lstrip("@")
+            if not value or value == "unassigned":
+                continue
+            if value.isdigit():
+                ids.append(int(value))
+                continue
+            users = self._json_or_empty(
+                request_with_retry(client, "GET", f"{self.base_url}/api/v4/users", params={"username": value})
+            )
+            if not users:
+                users = self._json_or_empty(
+                    request_with_retry(client, "GET", f"{self.base_url}/api/v4/users", params={"search": value})
+                )
+            fallback_id: int | None = None
+            for user in users if isinstance(users, list) else []:
+                username = str(user.get("username") or "")
+                name = str(user.get("name") or "")
+                user_id = user.get("id")
+                if isinstance(user_id, int) and fallback_id is None:
+                    fallback_id = user_id
+                if isinstance(user_id, int) and (username == value or name == value):
+                    ids.append(user_id)
+                    break
+            else:
+                if fallback_id is not None:
+                    ids.append(fallback_id)
+        return ids
 
     def _list_pages(
         self,
@@ -282,7 +510,7 @@ class GitLabClient:
         items: List[Dict[str, Any]] = []
         base_params = dict(params or {})
         for page in range(1, max_pages + 1):
-            response = client.get(url, params={**base_params, "per_page": 100, "page": page})
+            response = request_with_retry(client, "GET", url, params={**base_params, "per_page": 100, "page": page})
             data = self._json_or_empty(response)
             if not isinstance(data, list):
                 break
@@ -339,7 +567,21 @@ class GitLabClient:
                 for note in notes
                 if isinstance(note, dict) and not note.get("system")
             ],
-            metadata={"source_url": mr.get("web_url"), "provider_state": mr.get("state")},
+            metadata={
+                "source_url": mr.get("web_url"),
+                "provider_state": mr.get("state"),
+                "author": (mr.get("author") or {}).get("username") or "",
+                "changes": [
+                    {
+                        "path": change.get("new_path") or change.get("old_path"),
+                        "old_path": change.get("old_path"),
+                        "new_path": change.get("new_path"),
+                        "diff": change.get("diff", "")[:20000],
+                    }
+                    for change in changes.get("changes", [])
+                    if isinstance(change, dict)
+                ],
+            },
         )
 
     def _json_or_empty(self, response: httpx.Response) -> Any:
@@ -367,7 +609,9 @@ class GitHubClient:
         with httpx.Client(timeout=30.0, headers=headers) as client:
             while limit <= 0 or len(records) < limit:
                 remaining = 100 if limit <= 0 else min(100, limit - len(records))
-                response = client.get(
+                response = request_with_retry(
+                    client,
+                    "GET",
                     f"{self.base_url}/repos/{repo}/pulls",
                     params={
                         "state": state,
@@ -409,14 +653,83 @@ class GitHubClient:
             response.raise_for_status()
             return response.json()
 
-    def create_issue(self, repo: str, title: str, body: str, labels: Optional[List[str]] = None) -> Dict[str, Any]:
+    def create_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        labels: Optional[List[str]] = None,
+        assignees: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            payload: Dict[str, Any] = {"title": title, "body": body, "labels": labels or []}
+            if assignees:
+                payload["assignees"] = [name.lstrip("@") for name in assignees if name and name != "unassigned"]
             response = client.post(
                 f"{self.base_url}/repos/{repo}/issues",
-                json={"title": title, "body": body, "labels": labels or []},
+                json=payload,
             )
             response.raise_for_status()
             return response.json()
+
+    def list_issues(
+        self,
+        repo: str,
+        labels: Optional[List[str]] = None,
+        state: str = "open",
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        params: Dict[str, Any] = {"state": state, "sort": "updated", "direction": "desc"}
+        if labels:
+            params["labels"] = ",".join(labels)
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            return self._list_pages(
+                client,
+                f"{self.base_url}/repos/{repo}/issues",
+                params,
+                max_pages=max(1, (limit + 99) // 100),
+            )[:limit]
+
+    def comment_on_issue(self, repo: str, issue_id: str, body: str) -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = request_with_retry(
+                client,
+                "POST",
+                f"{self.base_url}/repos/{repo}/issues/{issue_id}/comments",
+                json={"body": body},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def close_issue(self, repo: str, issue_id: str) -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = request_with_retry(
+                client,
+                "PATCH",
+                f"{self.base_url}/repos/{repo}/issues/{issue_id}",
+                json={"state": "closed"},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def issue_linked_changes(self, repo: str, issue_id: str) -> List[Dict[str, Any]]:
+        headers = self._headers() | {"Accept": "application/vnd.github+json"}
+        linked = []
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            timeline = self._json_or_empty(
+                request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.base_url}/repos/{repo}/issues/{issue_id}/timeline",
+                    params={"per_page": 100},
+                )
+            )
+        for event in timeline if isinstance(timeline, list) else []:
+            source = event.get("source", {}) if isinstance(event, dict) else {}
+            issue = source.get("issue", {}) if isinstance(source, dict) else {}
+            if issue.get("pull_request"):
+                linked.append(issue)
+        return linked
 
     def create_branch(self, repo: str, branch: str, ref: str = "main") -> Dict[str, Any]:
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
@@ -431,6 +744,18 @@ class GitHubClient:
                 return {"ref": f"refs/heads/{branch}", "already_exists": True}
             response.raise_for_status()
             return response.json()
+
+    def delete_branch(self, repo: str, branch: str) -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = request_with_retry(
+                client,
+                "DELETE",
+                f"{self.base_url}/repos/{repo}/git/refs/heads/{quote(branch, safe='/')}",
+            )
+            if response.status_code == 404:
+                return {"branch": branch, "already_absent": True}
+            response.raise_for_status()
+            return {"branch": branch, "deleted": True}
 
     def commit_files(self, repo: str, branch: str, message: str, files: Dict[str, str]) -> Dict[str, Any]:
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
@@ -453,6 +778,16 @@ class GitHubClient:
             )
             response.raise_for_status()
             return response.json()
+
+    def sync_wiki_pages(self, repo: str, pages: Dict[str, str]) -> Dict[str, Any]:
+        files = {f"docs/sentinelgraph-memory/{path}": content for path, content in pages.items()}
+        result = self.commit_files(repo, "main", "docs: sync SentinelGraph security memory pages", files)
+        return {
+            "pages": len(files),
+            "target": "github-repo-docs",
+            "note": "GitHub wiki is a separate git repository; pages were synced to repo docs for API-only operation.",
+            "result": result,
+        }
 
     def get_policy_status(self, repo: str, default_branch: str = "main") -> Dict[str, Any]:
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
@@ -565,6 +900,48 @@ class GitHubClient:
                     artifacts[f"github-artifact-{artifact.get('id')}.zip"] = response.content
         return artifacts
 
+    def file_history(self, repo: str, path: str, ref: str = "main", limit: int = 20) -> List[Dict[str, Any]]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(
+                request_with_retry(
+                    client,
+                    "GET",
+                    f"{self.base_url}/repos/{repo}/commits",
+                    params={"sha": ref, "path": path, "per_page": min(limit, 100)},
+                )
+            )
+        return data if isinstance(data, list) else []
+
+    def file_blame(
+        self,
+        repo: str,
+        path: str,
+        ref: str = "main",
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        commits = self.file_history(repo, path, ref, limit=1)
+        if not commits:
+            return []
+        return [{"commit": commits[0], "lines": [{"line_number": start_line, "content": ""}], "source": "github-history-fallback"}]
+
+    def commit_diff(self, repo: str, commit_sha: str) -> List[Dict[str, Any]]:
+        headers = self._headers() | {"Accept": "application/vnd.github+json"}
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            data = self._json_or_empty(
+                request_with_retry(client, "GET", f"{self.base_url}/repos/{repo}/commits/{commit_sha}")
+            )
+        files = data.get("files") if isinstance(data, dict) else []
+        return files if isinstance(files, list) else []
+
+    def merge_requests_for_commit(self, repo: str, commit_sha: str) -> List[Dict[str, Any]]:
+        headers = self._headers() | {"Accept": "application/vnd.github.groot-preview+json"}
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            data = self._json_or_empty(
+                request_with_retry(client, "GET", f"{self.base_url}/repos/{repo}/commits/{commit_sha}/pulls")
+            )
+        return data if isinstance(data, list) else []
+
     def _headers(self) -> Dict[str, str]:
         headers = {
             "Accept": "application/vnd.github+json",
@@ -584,7 +961,7 @@ class GitHubClient:
         items: List[Dict[str, Any]] = []
         base_params = dict(params or {})
         for page in range(1, max_pages + 1):
-            data = self._json_or_empty(client.get(url, params={**base_params, "per_page": 100, "page": page}))
+            data = self._json_or_empty(request_with_retry(client, "GET", url, params={**base_params, "per_page": 100, "page": page}))
             if not isinstance(data, list):
                 break
             items.extend(item for item in data if isinstance(item, dict))
@@ -631,7 +1008,23 @@ class GitHubClient:
             labels=labels,
             approvals=approvals,
             comments=comments,
-            metadata={"source_url": pr.get("html_url"), "provider_state": pr.get("state")},
+            metadata={
+                "source_url": pr.get("html_url"),
+                "provider_state": pr.get("state"),
+                "author": (pr.get("user") or {}).get("login") or "",
+                "changes": [
+                    {
+                        "path": item.get("filename"),
+                        "old_path": item.get("previous_filename"),
+                        "new_path": item.get("filename"),
+                        "patch": item.get("patch", "")[:20000],
+                        "additions": item.get("additions"),
+                        "deletions": item.get("deletions"),
+                    }
+                    for item in files
+                    if isinstance(item, dict)
+                ],
+            },
         )
 
     def _json_or_empty(self, response: httpx.Response) -> Any:
@@ -692,8 +1085,16 @@ class HistoryImporter:
                     id=stable_id("merge_request", mr.repo, mr.mr_id),
                     provider=record.provider,
                     state=record.state,
+                    author=record.author,
+                    title=record.title,
+                    files_changed=record.files_changed,
+                    commits=record.commits,
+                    merged_at=record.merged_at,
+                    diff_summary=record.diff_summary,
+                    labels=record.labels,
                     source_url=record.metadata.get("source_url"),
                     comments=[comment.model_dump() for comment in record.comments],
+                    metadata=record.metadata,
                 )
                 self.engines.graph.link(integration.id, mr_entity.id, "imported")
                 if import_decisions:
@@ -783,10 +1184,14 @@ def normalize_record(record: SourceChangeRecord) -> MergeRequestInput:
 
 def extract_decisions(record: SourceChangeRecord) -> List[DecisionInput]:
     decisions: List[DecisionInput] = []
-    for idx, comment in enumerate(record.comments, start=1):
-        body = comment.body.strip()
+    sources = [
+        ("description", "description", record.description),
+        ("title", "title", record.title),
+    ] + [(comment.id, comment.author, comment.body) for comment in record.comments]
+    for idx, (source_id, author, raw_body) in enumerate(sources, start=1):
+        body = str(raw_body or "").strip()
         lower = body.lower()
-        if not any(marker in lower for marker in DECISION_MARKERS):
+        if not any(marker in lower for marker in DECISION_MARKERS) and not semantic_decision_signal(lower):
             continue
         title = first_sentence(body)
         tags = []
@@ -808,13 +1213,28 @@ def extract_decisions(record: SourceChangeRecord) -> List[DecisionInput]:
                 evidence={
                     "provider": record.provider,
                     "mr_id": record.mr_id,
-                    "comment_id": comment.id,
-                    "author": comment.author,
-                    "created_at": comment.created_at,
+                    "source_id": source_id,
+                    "author": author,
                 },
             )
         )
     return decisions
+
+
+def semantic_decision_signal(text: str) -> bool:
+    return any(
+        phrase in text
+        for phrase in [
+            "must require",
+            "must not",
+            "never allow",
+            "deny by default",
+            "security owner",
+            "encryption at rest",
+            "parameterized queries",
+            "negative tests",
+        ]
+    )
 
 
 def summarize_changes(changes: List[Dict[str, Any]]) -> str:

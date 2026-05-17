@@ -1,0 +1,12 @@
+---
+name: remediation-verification
+description: Verify tracked security fixes, close resolved issues, and escalate stale remediation.
+slash-command: enabled
+---
+
+## Remediation Verification
+
+Inspects tracked security issues, checks linked remediation changes, verifies merged
+fix evidence, comments with before/after status, closes verified items, escalates
+stale work, and creates a central verification report.
+

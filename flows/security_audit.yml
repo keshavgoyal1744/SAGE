@@ -1,0 +1,116 @@
+name: "SentinelGraph Security Audit"
+description: "End-to-end security audit flow: policy audit, scanner validation, vulnerability triage, and remediation verification."
+public: true
+definition:
+  version: v1
+  environment: ambient
+  components:
+    - name: "policy_audit"
+      type: AgentComponent
+      prompt_id: "policy_audit_prompt"
+      inputs:
+        - "context:goal"
+        - "context:project_id"
+      toolset:
+        - get_repository_file
+        - create_issue
+        - create_merge_request
+        - create_issue_note
+      ui_log_events:
+        - on_agent_final_answer
+        - on_tool_execution_success
+        - on_tool_execution_failed
+    - name: "scanner_validation"
+      type: AgentComponent
+      prompt_id: "scanner_validation_prompt"
+      inputs:
+        - "context:goal"
+        - "context:project_id"
+      toolset:
+        - get_repository_file
+        - create_file_with_contents
+        - create_commit
+        - create_merge_request
+        - create_issue
+        - create_issue_note
+      ui_log_events:
+        - on_agent_final_answer
+        - on_tool_execution_success
+        - on_tool_execution_failed
+    - name: "vulnerability_triage"
+      type: AgentComponent
+      prompt_id: "vulnerability_triage_prompt"
+      inputs:
+        - "context:goal"
+        - "context:project_id"
+      toolset:
+        - get_repository_file
+        - get_commit_diff
+        - create_issue
+        - create_issue_note
+      ui_log_events:
+        - on_agent_final_answer
+        - on_tool_execution_success
+        - on_tool_execution_failed
+    - name: "remediation_verification"
+      type: AgentComponent
+      prompt_id: "remediation_verification_prompt"
+      inputs:
+        - "context:goal"
+        - "context:project_id"
+      toolset:
+        - get_repository_file
+        - get_merge_request
+        - create_issue
+        - create_issue_note
+      ui_log_events:
+        - on_agent_final_answer
+        - on_tool_execution_success
+        - on_tool_execution_failed
+  prompts:
+    - prompt_id: "policy_audit_prompt"
+      name: "SentinelGraph Policy Audit"
+      prompt_template:
+        system: |
+          Audit repository security controls. Check CI security scanners, branch protection,
+          required approvals, required passing pipelines, and protected environments.
+          Create a report issue and a remediation merge request for actionable gaps.
+        user: "{{goal}}"
+      unit_primitives: []
+      params:
+        timeout: 600
+    - prompt_id: "scanner_validation_prompt"
+      name: "SentinelGraph Scanner Validation"
+      prompt_template:
+        system: |
+          Create a scanner validation branch, inject the 15-payload SAST/secret suite,
+          wait for CI security reports, compute scanner confidence and OWASP coverage,
+          open a remediation merge request when gaps are found, and comment on the
+          triggering issue or merge request.
+        user: "{{goal}}"
+      unit_primitives: []
+      params:
+        timeout: 900
+    - prompt_id: "vulnerability_triage_prompt"
+      name: "SentinelGraph Vulnerability Triage"
+      prompt_template:
+        system: |
+          Fetch current provider security findings. Ignore scanner validation payloads,
+          classify likely true and false positives, prioritize P0-P3, identify likely
+          owners from file history, create child issues for P0/P1 findings, and post
+          a central triage report.
+        user: "{{goal}}"
+      unit_primitives: []
+      params:
+        timeout: 600
+    - prompt_id: "remediation_verification_prompt"
+      name: "SentinelGraph Remediation Verification"
+      prompt_template:
+        system: |
+          Inspect tracked security issues, find linked remediation changes, verify
+          merged fixes against current source and CI policy evidence, close verified
+          issues, escalate stale issues, and create a central verification report.
+        user: "{{goal}}"
+      unit_primitives: []
+      params:
+        timeout: 600

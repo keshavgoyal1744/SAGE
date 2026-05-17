@@ -144,6 +144,8 @@ class ProviderTarget(BaseModel):
     token_env: Optional[str] = None
     base_url: Optional[str] = None
     dry_run: bool = True
+    trigger_change_id: Optional[str] = None
+    trigger_issue_id: Optional[str] = None
 
 
 class WritebackAction(BaseModel):
@@ -163,6 +165,8 @@ class ScannerChaosRequest(ProviderTarget):
     wait_for_ci: bool = False
     timeout_seconds: int = 900
     poll_seconds: int = 15
+    cleanup_branch: bool = False
+    block_merge: bool = True
 
 
 class PolicyAuditRequest(ProviderTarget):
@@ -187,9 +191,40 @@ class ScanArtifactParseRequest(BaseModel):
     artifacts: List[ScanArtifactInput]
 
 
+class VulnerabilityTriageRequest(ProviderTarget):
+    default_branch: str = "main"
+    max_findings: int = 100
+    create_child_issues: bool = True
+    create_report_issue: bool = True
+    minimum_child_priority: Literal["P0", "P1", "P2", "P3"] = "P1"
+    enrich_advisories: bool = True
+    dedupe_existing_issues: bool = True
+
+
+class RemediationVerificationRequest(ProviderTarget):
+    default_branch: str = "main"
+    issue_labels: List[str] = Field(default_factory=lambda: ["security", "sentinelgraph"])
+    max_issues: int = 50
+    close_verified: bool = True
+    escalate_stale: bool = True
+    create_report_issue: bool = True
+
+
+class FullSecurityAuditRequest(ProviderTarget):
+    default_branch: str = "main"
+    wait_for_ci: bool = False
+    timeout_seconds: int = 900
+    poll_seconds: int = 15
+    run_triage: bool = True
+    run_verification: bool = True
+    cleanup_scanner_branch: bool = False
+
+
 class RegressionRequest(ProviderTarget):
     incident_id: Optional[str] = None
     finding_id: Optional[str] = None
+    affected_file: Optional[str] = None
+    default_branch: str = "main"
     open_remediation: bool = True
     open_tests: bool = True
 
@@ -197,11 +232,14 @@ class RegressionRequest(ProviderTarget):
 class CiOptimizeRequest(ProviderTarget):
     ci_path: str = ".gitlab-ci.yml"
     workflow_path: str = ".github/workflows/ci.yml"
+    default_branch: str = "main"
     branch: str = "sentinelgraph/optimize-ci"
 
 
 class MemorySyncRequest(ProviderTarget):
     mode: Literal["pull", "push", "both"] = "both"
+    external_target: Literal["repo", "wiki", "both"] = "repo"
+    branch: str = "sentinelgraph/memory-sync"
 
 
 class MemoryAskRequest(BaseModel):
@@ -233,6 +271,35 @@ class SchedulerJobInput(BaseModel):
     token_env: Optional[str] = None
     limit: int = 100
     enabled: bool = True
+
+
+class OrgConfigInput(BaseModel):
+    org_id: str
+    provider: Literal["gitlab", "github"]
+    repos: List[str] = Field(default_factory=list)
+    token_env: Optional[str] = None
+    base_url: Optional[str] = None
+    default_branch: str = "main"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BackgroundImportRequest(BaseModel):
+    job_id: str
+    provider: Literal["gitlab", "github"]
+    repo: str
+    token_env: Optional[str] = None
+    base_url: Optional[str] = None
+    limit: int = 0
+    include_closed: bool = True
+    import_decisions: bool = True
+    analyze: bool = True
+
+
+class AgentExploreRequest(ProviderTarget):
+    mr_id: Optional[str] = None
+    file_path: Optional[str] = None
+    question: str = "Find security-sensitive code paths and likely regression risks."
+    default_branch: str = "main"
 
 
 class RuntimeEventInput(BaseModel):
@@ -279,7 +346,25 @@ class PackageInput(BaseModel):
     days_since_last_release: Optional[int] = None
     typo_similarity_to: Optional[str] = None
     known_advisories: List[str] = Field(default_factory=list)
+    enrich_advisories: bool = True
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AdvisoryEnrichmentRequest(BaseModel):
+    ecosystem: Optional[str] = None
+    package: Optional[str] = None
+    version: Optional[str] = None
+    purl: Optional[str] = None
+    cve: Optional[str] = None
+    ghsa: Optional[str] = None
+    include_nvd: bool = True
+
+
+class SlashCommandRequest(ProviderTarget):
+    command: str
+    actor: str = "unknown"
+    body: str = ""
+    default_branch: str = "main"
 
 
 class IncidentInput(BaseModel):
@@ -299,6 +384,28 @@ class PolicyEvaluationInput(BaseModel):
     repo: str
     subject_id: str
     subject_type: str = "merge_request"
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExploitabilitySimulationRequest(BaseModel):
+    repo: str
+    finding_id: Optional[str] = None
+    title: str = "Security finding"
+    category: str = "security"
+    severity: str = "medium"
+    file: Optional[str] = None
+    service: Optional[str] = None
+    cve: Optional[str] = None
+    ghsa: Optional[str] = None
+    attacker_goal: str = "Demonstrate whether this finding is reachable and chainable."
+    require_runtime_evidence: bool = False
+
+
+class SecurityDebateRequest(BaseModel):
+    repo: str
+    subject_id: Optional[str] = None
+    subject_type: str = "merge_request"
+    prompt: str = "Assess security risk and required evidence."
     context: Dict[str, Any] = Field(default_factory=dict)
 
 

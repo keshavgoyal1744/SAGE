@@ -42,3 +42,44 @@ def test_api_production_workflow_routes():
     html = client.get("/memory/dashboard.html")
     assert html.status_code == 200
     assert "SentinelGraph Dashboard" in html.text
+
+    ui = client.get("/ui")
+    assert ui.status_code == 200
+    assert "Operational Summary" in ui.text
+
+    org = client.post("/orgs", json={"org_id": "acme", "provider": "github", "repos": ["acme/api"]})
+    assert org.status_code == 200
+    assert org.json()["org_id"] == "acme"
+
+    enforced = client.post(
+        "/memory/enforce-patterns",
+        json={
+            "repo": "payments-platform",
+            "mr_id": "910",
+            "title": "auth change",
+            "author": "dev",
+            "files_changed": ["services/gateway/auth.py"],
+        },
+    )
+    assert enforced.status_code == 200
+
+    ide = client.post(
+        "/reputation/ide-agent",
+        json={
+            "repo": "payments-platform",
+            "mr_id": "911",
+            "title": "AI auth update",
+            "author": "dev",
+            "files_changed": ["services/gateway/auth.py"],
+            "ai_assisted": True,
+        },
+    )
+    assert ide.status_code == 200
+    assert ide.json()["ide_focus"]
+
+    explore = client.post(
+        "/reputation/explore",
+        json={"repo": "payments-platform", "question": "md5 pickle.loads requests.get"},
+    )
+    assert explore.status_code == 200
+    assert explore.json()["findings"]

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from .graph import SecurityGraph
-from .models import MemoryAskRequest, MemorySyncRequest, ReplyCommandInput
+from .models import MemoryAskRequest, MemorySyncRequest, MergeRequestInput, ReplyCommandInput
 from .provider_ops import ProviderOps
 from .utils import stable_id
 
@@ -46,14 +46,17 @@ class MemorySuite:
         actions = []
         if request.mode in {"push", "both"}:
             ops = ProviderOps(request)
-            branch = "sentinelgraph/memory-sync"
-            actions.extend(
-                [
-                    ops.create_branch(branch),
-                    ops.commit_files(branch, "docs: sync SentinelGraph security memory", pages),
-                    ops.create_change_request(branch, "main", "SentinelGraph memory sync", "Publishes current security memory pages."),
-                ]
-            )
+            if request.external_target in {"repo", "both"}:
+                branch = request.branch
+                actions.extend(
+                    [
+                        ops.create_branch(branch),
+                        ops.commit_files(branch, "docs: sync SentinelGraph security memory", pages),
+                        ops.create_change_request(branch, "main", "SentinelGraph memory sync", "Publishes current security memory pages."),
+                    ]
+                )
+            if request.external_target in {"wiki", "both"}:
+                actions.append(ops.sync_wiki_pages(pages))
         return {"pages": pages, "actions": [action.model_dump() for action in actions]}
 
     def ask(self, request: MemoryAskRequest) -> Dict[str, object]:
@@ -191,6 +194,28 @@ class MemorySuite:
             for rule, count in counter.items()
         ]
         return {"rules": rules}
+
+    def enforce_patterns(self, item: MergeRequestInput) -> Dict[str, object]:
+        rules = self.pattern_rules()["rules"]
+        text = f"{item.title} {item.description} {item.diff_summary} {' '.join(item.files_changed)}".lower()
+        violations = []
+        for rule in rules:
+            marker = rule["rule"]
+            if marker == "do not use md5" and "md5" in text:
+                violations.append({"rule": marker, "severity": "high", "message": "MR appears to use MD5 despite review memory."})
+            if marker == "use parameterized queries" and any(term in text for term in ["select *", " + ", "format("]):
+                violations.append({"rule": marker, "severity": "high", "message": "MR contains query-building signals that need parameterization review."})
+            if marker == "add negative tests" and not any(path.startswith("tests/") or "/test" in path for path in item.files_changed):
+                violations.append({"rule": marker, "severity": "medium", "message": "Review memory asks for negative tests, but no test file changed."})
+            if marker == "avoid bypass" and "bypass" in text:
+                violations.append({"rule": marker, "severity": "high", "message": "MR uses bypass language against review memory."})
+        return {
+            "repo": item.repo,
+            "mr_id": item.mr_id,
+            "rules_evaluated": len(rules),
+            "violations": violations,
+            "status": "fail" if any(v["severity"] == "high" for v in violations) else "warn" if violations else "pass",
+        }
 
     def _decision_page(self, decision) -> str:
         attrs = decision.attributes

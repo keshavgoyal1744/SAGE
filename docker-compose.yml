@@ -5,12 +5,29 @@ services:
       - "8088:8088"
     environment:
       SENTINELGRAPH_DB: /data/sentinelgraph.db
+      SENTINELGRAPH_MODEL_CHECKPOINT_DIR: /data/checkpoints
+      SENTINELGRAPH_REPUTATION_POSTGRES_DSN: ${SENTINELGRAPH_REPUTATION_POSTGRES_DSN:-}
+      SENTINELGRAPH_GCS_BUCKET: ${SENTINELGRAPH_GCS_BUCKET:-}
       GITLAB_TOKEN: ${GITLAB_TOKEN:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       SENTINELGRAPH_GITLAB_WEBHOOK_SECRET: ${SENTINELGRAPH_GITLAB_WEBHOOK_SECRET:-}
       SENTINELGRAPH_GITHUB_WEBHOOK_SECRET: ${SENTINELGRAPH_GITHUB_WEBHOOK_SECRET:-}
     volumes:
       - sentinelgraph-data:/data
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sentinelgraph
+      POSTGRES_PASSWORD: sentinelgraph
+      POSTGRES_DB: sentinelgraph
+    ports:
+      - "5433:5432"
+    volumes:
+      - sentinelgraph-postgres:/var/lib/postgresql/data
 
 volumes:
   sentinelgraph-data:
+  sentinelgraph-postgres:

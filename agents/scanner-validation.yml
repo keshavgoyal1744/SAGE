@@ -1,0 +1,12 @@
+---
+name: scanner-validation
+description: Validate SAST and secret scanners with synthetic payloads and OWASP coverage scoring.
+slash-command: enabled
+---
+
+## Scanner Validation
+
+Creates a validation branch, injects 15 synthetic security payloads, waits for CI
+when requested, parses scanner artifacts, computes control confidence, and opens
+remediation work for gaps.
+
