@@ -1,0 +1,30 @@
+{
+  "repo": "payments-platform",
+  "mr_id": "129",
+  "title": "Update identity token parser",
+  "description": "AI-assisted cleanup of token parser and session validation.",
+  "author": "sam",
+  "created_at": "2026-05-17T01:10:00+00:00",
+  "files_changed": [
+    "services/identity/session.py",
+    "services/gateway/auth_middleware.py"
+  ],
+  "diff_summary": "Removed duplicated validation helper and temporarily skips issuer check for legacy clients.",
+  "labels": ["security-sensitive"],
+  "ai_assisted": true,
+  "approvals": 1,
+  "deployment_window": "weekend",
+  "metadata": {
+    "ai": {
+      "model_family": "general-code-model",
+      "risk_fingerprint": ["missing-validation", "generated-auth-logic"]
+    },
+    "dependencies": [
+      {"name": "jwt-lite", "risk_level": "critical", "new": true}
+    ],
+    "developer_behavior": {
+      "frequent_rollbacks": false,
+      "high_regression_rate": true
+    }
+  }
+}
