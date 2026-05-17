@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hmac
 import os
-from base64 import b64encode
+import time
+from base64 import b64decode, b64encode
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 from urllib.parse import quote
@@ -171,27 +172,124 @@ class GitLabClient:
             response.raise_for_status()
             return response.json()
 
-    def get_policy_status(self, repo: str) -> Dict[str, Any]:
+    def get_policy_status(self, repo: str, default_branch: str = "main") -> Dict[str, Any]:
         project = quote(repo, safe="")
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
-            protected = self._json_or_empty(client.get(f"{self.base_url}/api/v4/projects/{project}/protected_branches"))
+            protected = self._list_pages(client, f"{self.base_url}/api/v4/projects/{project}/protected_branches")
             approvals = self._json_or_empty(client.get(f"{self.base_url}/api/v4/projects/{project}/approvals"))
+            approval_rules = self._list_pages(client, f"{self.base_url}/api/v4/projects/{project}/approval_rules")
             project_data = self._json_or_empty(client.get(f"{self.base_url}/api/v4/projects/{project}"))
+            environments = self._list_pages(client, f"{self.base_url}/api/v4/projects/{project}/protected_environments")
+        protected_names = [item.get("name") for item in protected if isinstance(item, dict)]
+        approvals_before_merge = approvals.get("approvals_before_merge", 0) if isinstance(approvals, dict) else 0
         return {
-            "protected_branches": bool(protected),
-            "approval_rules": bool(approvals),
+            "protected_branches": default_branch in protected_names or bool(protected),
+            "approval_rules": bool(approval_rules) or approvals_before_merge > 0,
             "only_allow_merge_if_pipeline_succeeds": bool(project_data.get("only_allow_merge_if_pipeline_succeeds")),
-            "protected_environments": "unknown",
+            "protected_environments": bool(environments),
+            "protected_environment_count": len(environments),
+            "protected_branch_count": len(protected),
+            "protected_branch_names": protected_names,
         }
 
     def get_security_findings(self, repo: str) -> List[Dict[str, Any]]:
         project = quote(repo, safe="")
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
-            data = self._json_or_empty(client.get(f"{self.base_url}/api/v4/projects/{project}/vulnerability_findings"))
+            findings = self._list_pages(
+                client,
+                f"{self.base_url}/api/v4/projects/{project}/vulnerability_findings",
+                {"scope": "all"},
+            )
+            vulnerabilities = self._list_pages(
+                client,
+                f"{self.base_url}/api/v4/projects/{project}/vulnerabilities",
+                {"scope": "all"},
+            )
+            dependencies = self._list_pages(client, f"{self.base_url}/api/v4/projects/{project}/dependencies")
+        result = []
+        if isinstance(findings, list):
+            result.extend({"source": "gitlab-vulnerability-finding", **item} for item in findings)
+        if isinstance(vulnerabilities, list):
+            result.extend({"source": "gitlab-vulnerability", **item} for item in vulnerabilities)
+        if isinstance(dependencies, list):
+            result.extend({"source": "gitlab-dependency", **item} for item in dependencies)
+        return result
+
+    def get_file(self, repo: str, path: str, ref: str = "main") -> Optional[str]:
+        project = quote(repo, safe="")
+        file_path = quote(path, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.get(
+                f"{self.base_url}/api/v4/projects/{project}/repository/files/{file_path}/raw",
+                params={"ref": ref},
+            )
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.text
+
+    def list_ci_runs(self, repo: str, ref: str = "main") -> List[Dict[str, Any]]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(
+                client.get(f"{self.base_url}/api/v4/projects/{project}/pipelines", params={"ref": ref, "per_page": 20})
+            )
         return data if isinstance(data, list) else []
+
+    def list_ci_jobs(self, repo: str, run_id: str) -> List[Dict[str, Any]]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(
+                client.get(f"{self.base_url}/api/v4/projects/{project}/pipelines/{run_id}/jobs", params={"per_page": 100})
+            )
+        return data if isinstance(data, list) else []
+
+    def wait_for_ci(self, repo: str, ref: str = "main", timeout_seconds: int = 900, poll_seconds: int = 15) -> Dict[str, Any]:
+        deadline = time.monotonic() + timeout_seconds
+        last_run: Dict[str, Any] = {}
+        while time.monotonic() <= deadline:
+            runs = self.list_ci_runs(repo, ref)
+            if runs:
+                last_run = runs[0]
+                if last_run.get("status") in {"success", "failed", "canceled", "skipped", "manual"}:
+                    return {"completed": True, "run": last_run, "jobs": self.list_ci_jobs(repo, str(last_run.get("id")))}
+            time.sleep(max(1, poll_seconds))
+        return {"completed": False, "run": last_run, "jobs": []}
+
+    def download_ci_artifacts(self, repo: str, jobs: List[Dict[str, Any]]) -> Dict[str, bytes]:
+        project = quote(repo, safe="")
+        artifacts: Dict[str, bytes] = {}
+        with httpx.Client(timeout=60.0, headers=self._headers()) as client:
+            for job in jobs:
+                if not job.get("artifacts_file") and not job.get("artifacts"):
+                    continue
+                job_id = job.get("id")
+                response = client.get(f"{self.base_url}/api/v4/projects/{project}/jobs/{job_id}/artifacts")
+                if response.status_code == 200:
+                    artifacts[f"gitlab-job-{job_id}-artifacts.zip"] = response.content
+        return artifacts
 
     def _headers(self) -> Dict[str, str]:
         return {"PRIVATE-TOKEN": self.token} if self.token else {}
+
+    def _list_pages(
+        self,
+        client: httpx.Client,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_pages: int = 5,
+    ) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        base_params = dict(params or {})
+        for page in range(1, max_pages + 1):
+            response = client.get(url, params={**base_params, "per_page": 100, "page": page})
+            data = self._json_or_empty(response)
+            if not isinstance(data, list):
+                break
+            items.extend(item for item in data if isinstance(item, dict))
+            if len(data) < 100:
+                break
+        return items
 
     def _fetch_one(self, client: httpx.Client, project: str, repo: str, mr: Dict[str, Any]) -> SourceChangeRecord:
         iid = str(mr.get("iid") or mr.get("id"))
@@ -356,21 +454,116 @@ class GitHubClient:
             response.raise_for_status()
             return response.json()
 
-    def get_policy_status(self, repo: str) -> Dict[str, Any]:
+    def get_policy_status(self, repo: str, default_branch: str = "main") -> Dict[str, Any]:
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
-            branch = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}/branches/main/protection"))
+            branch = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}/branches/{quote(default_branch, safe='')}/protection"))
             repo_data = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}"))
+            environments = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}/environments"))
+            environment_details = []
+            for environment in (environments or {}).get("environments", []) if isinstance(environments, dict) else []:
+                name = environment.get("name")
+                if not name:
+                    continue
+                detail = self._json_or_empty(
+                    client.get(f"{self.base_url}/repos/{repo}/environments/{quote(name, safe='')}")
+                )
+                if isinstance(detail, dict):
+                    environment_details.append(detail)
+                else:
+                    environment_details.append(environment)
+        protected_environments = [
+            item
+            for item in environment_details
+            if item.get("protection_rules") or item.get("deployment_branch_policy")
+        ]
         return {
             "protected_branches": bool(branch),
             "approval_rules": bool(branch.get("required_pull_request_reviews")) if isinstance(branch, dict) else False,
             "only_allow_merge_if_pipeline_succeeds": bool(branch.get("required_status_checks")) if isinstance(branch, dict) else False,
-            "protected_environments": bool(repo_data.get("has_projects")) if isinstance(repo_data, dict) else "unknown",
+            "protected_environments": bool(protected_environments),
+            "protected_environment_count": len(protected_environments),
+            "environment_count": len(environment_details),
+            "private": bool(repo_data.get("private")) if isinstance(repo_data, dict) else False,
         }
 
     def get_security_findings(self, repo: str) -> List[Dict[str, Any]]:
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
-            data = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}/code-scanning/alerts"))
-        return data if isinstance(data, list) else []
+            code_scanning = self._list_pages(
+                client,
+                f"{self.base_url}/repos/{repo}/code-scanning/alerts",
+                {"state": "open"},
+            )
+            dependabot = self._list_pages(
+                client,
+                f"{self.base_url}/repos/{repo}/dependabot/alerts",
+                {"state": "open"},
+            )
+            secrets = self._list_pages(
+                client,
+                f"{self.base_url}/repos/{repo}/secret-scanning/alerts",
+                {"state": "open"},
+            )
+        result = []
+        if isinstance(code_scanning, list):
+            result.extend({"source": "github-code-scanning", **item} for item in code_scanning)
+        if isinstance(dependabot, list):
+            result.extend({"source": "github-dependabot", **item} for item in dependabot)
+        if isinstance(secrets, list):
+            result.extend({"source": "github-secret-scanning", **item} for item in secrets)
+        return result
+
+    def get_file(self, repo: str, path: str, ref: str = "main") -> Optional[str]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.get(f"{self.base_url}/repos/{repo}/contents/{path}", params={"ref": ref})
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            data = response.json()
+            content = data.get("content")
+            if content:
+                return b64decode(content).decode("utf-8", errors="replace")
+            return None
+
+    def list_ci_runs(self, repo: str, ref: str = "main") -> List[Dict[str, Any]]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(
+                client.get(f"{self.base_url}/repos/{repo}/actions/runs", params={"branch": ref, "per_page": 20})
+            )
+        if isinstance(data, dict):
+            return data.get("workflow_runs", [])
+        return []
+
+    def list_ci_jobs(self, repo: str, run_id: str) -> List[Dict[str, Any]]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}/actions/runs/{run_id}/jobs", params={"per_page": 100}))
+        if isinstance(data, dict):
+            return data.get("jobs", [])
+        return []
+
+    def wait_for_ci(self, repo: str, ref: str = "main", timeout_seconds: int = 900, poll_seconds: int = 15) -> Dict[str, Any]:
+        deadline = time.monotonic() + timeout_seconds
+        last_run: Dict[str, Any] = {}
+        while time.monotonic() <= deadline:
+            runs = self.list_ci_runs(repo, ref)
+            if runs:
+                last_run = runs[0]
+                if last_run.get("status") == "completed":
+                    return {"completed": True, "run": last_run, "jobs": self.list_ci_jobs(repo, str(last_run.get("id")))}
+            time.sleep(max(1, poll_seconds))
+        return {"completed": False, "run": last_run, "jobs": []}
+
+    def download_ci_artifacts(self, repo: str, run_id: str) -> Dict[str, bytes]:
+        artifacts: Dict[str, bytes] = {}
+        with httpx.Client(timeout=60.0, headers=self._headers(), follow_redirects=True) as client:
+            listing = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}/actions/runs/{run_id}/artifacts"))
+            for artifact in (listing or {}).get("artifacts", []) if isinstance(listing, dict) else []:
+                archive_url = artifact.get("archive_download_url")
+                if not archive_url:
+                    continue
+                response = client.get(archive_url)
+                if response.status_code == 200:
+                    artifacts[f"github-artifact-{artifact.get('id')}.zip"] = response.content
+        return artifacts
 
     def _headers(self) -> Dict[str, str]:
         headers = {
@@ -380,6 +573,24 @@ class GitHubClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
+
+    def _list_pages(
+        self,
+        client: httpx.Client,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_pages: int = 5,
+    ) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        base_params = dict(params or {})
+        for page in range(1, max_pages + 1):
+            data = self._json_or_empty(client.get(url, params={**base_params, "per_page": 100, "page": page}))
+            if not isinstance(data, list):
+                break
+            items.extend(item for item in data if isinstance(item, dict))
+            if len(data) < 100:
+                break
+        return items
 
     def _fetch_one(self, client: httpx.Client, repo: str, pr: Dict[str, Any]) -> SourceChangeRecord:
         number = str(pr.get("number"))

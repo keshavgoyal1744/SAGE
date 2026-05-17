@@ -27,6 +27,12 @@ change -> graph context -> risk score -> control confidence -> runtime feedback
 - Provider writeback for comments, issues, branches, commits, and PR/MR creation.
 - Scanner chaos workflow that injects synthetic payloads into a branch.
 - Security policy audit with remediation issue creation.
+- CI wait/poll support for GitLab pipelines and GitHub Actions workflow runs.
+- Security artifact parsing for GitLab SAST, secret detection, dependency/container scanning, and SARIF.
+- GitLab vulnerability/dependency security API aggregation.
+- GitHub code scanning, Dependabot, and secret scanning API aggregation.
+- Protected branch, approval, required status check, and protected environment checks.
+- Structured CI remediation for existing GitLab CI and GitHub Actions workflows.
 - Root-cause/sibling regression workflow with generated patch and test PR plans.
 - CI optimizer for GitLab CI and GitHub Actions.
 - Memory validation, sync pages, HTML dashboard, ask endpoint, onboarding, health, carbon, reply commands, and pattern rules.
@@ -97,6 +103,7 @@ Run production workflows in dry-run mode:
 ```bash
 python3 -m sentinelgraph.cli scanner-chaos --repo my-org/my-repo
 python3 -m sentinelgraph.cli policy-audit --repo my-org/my-repo
+python3 -m sentinelgraph.cli wait-ci --repo my-org/my-repo --ref main
 python3 -m sentinelgraph.cli regression --repo my-org/my-repo --incident-id incident_id
 python3 -m sentinelgraph.cli optimize-ci --repo my-org/my-repo
 python3 -m sentinelgraph.cli ask "what auth decisions govern gateway?"
@@ -105,6 +112,27 @@ python3 -m sentinelgraph.cli reputation-score examples_mr.json
 ```
 
 Add `--provider gitlab --execute` or `--provider github --execute` to mutate real repos. Use tokens through `GITLAB_TOKEN` or `GITHUB_TOKEN`.
+
+For scanner validation with real CI polling:
+
+```bash
+python3 -m sentinelgraph.cli scanner-chaos \
+  --provider gitlab \
+  --repo my-group/my-project \
+  --execute \
+  --wait-for-ci \
+  --timeout 900 \
+  --poll 15
+```
+
+Security artifact parsing is also available directly:
+
+```bash
+python3 -m sentinelgraph.cli parse-artifacts gl-sast-report.json results.sarif artifacts.zip
+python3 -m sentinelgraph.cli policy-audit --provider github --repo my-org/my-repo --default-branch trunk --execute
+```
+
+The API `POST /security/parse-artifacts` accepts text JSON/SARIF artifacts and base64-encoded zip archives from GitLab or GitHub CI artifact downloads.
 
 Deployment:
 

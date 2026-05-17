@@ -160,11 +160,31 @@ class ScannerChaosRequest(ProviderTarget):
     branch: str = "sentinelgraph/scanner-chaos"
     open_merge_request: bool = True
     payload_categories: List[str] = Field(default_factory=list)
+    wait_for_ci: bool = False
+    timeout_seconds: int = 900
+    poll_seconds: int = 15
 
 
 class PolicyAuditRequest(ProviderTarget):
     default_branch: str = "main"
     open_remediation: bool = True
+    remediate_ci: bool = True
+
+
+class CiWaitRequest(ProviderTarget):
+    ref: str = "main"
+    timeout_seconds: int = 900
+    poll_seconds: int = 15
+
+
+class ScanArtifactInput(BaseModel):
+    filename: str
+    content: str
+    encoding: Literal["text", "base64"] = "text"
+
+
+class ScanArtifactParseRequest(BaseModel):
+    artifacts: List[ScanArtifactInput]
 
 
 class RegressionRequest(ProviderTarget):

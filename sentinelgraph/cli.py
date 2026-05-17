@@ -11,6 +11,7 @@ from .demo import load_demo
 from .factory import build_engines
 from .models import (
     CiOptimizeRequest,
+    CiWaitRequest,
     FixtureImportRequest,
     MemoryAskRequest,
     MemorySyncRequest,
@@ -19,10 +20,13 @@ from .models import (
     RegressionRequest,
     ReputationFeedbackInput,
     ScannerChaosRequest,
+    ScanArtifactParseRequest,
     SourceImportRequest,
 )
 from .sarif import findings_to_sarif
+from .scan_reports import parse_security_artifacts
 from .source_control import HistoryImporter, ProviderError
+from .provider_ops import ProviderOps
 
 
 def main() -> None:
@@ -59,11 +63,26 @@ def main() -> None:
     scanner.add_argument("--provider", default="fixture", choices=["fixture", "gitlab", "github"])
     scanner.add_argument("--repo", required=True)
     scanner.add_argument("--execute", action="store_true")
+    scanner.add_argument("--wait-for-ci", action="store_true")
+    scanner.add_argument("--timeout", type=int, default=900)
+    scanner.add_argument("--poll", type=int, default=15)
 
     audit = sub.add_parser("policy-audit", help="Audit repository security policy settings")
     audit.add_argument("--provider", default="fixture", choices=["fixture", "gitlab", "github"])
     audit.add_argument("--repo", required=True)
+    audit.add_argument("--default-branch", default="main")
     audit.add_argument("--execute", action="store_true")
+
+    wait_ci = sub.add_parser("wait-ci", help="Wait for provider CI and parse security artifacts")
+    wait_ci.add_argument("--provider", default="fixture", choices=["fixture", "gitlab", "github"])
+    wait_ci.add_argument("--repo", required=True)
+    wait_ci.add_argument("--ref", default="main")
+    wait_ci.add_argument("--timeout", type=int, default=900)
+    wait_ci.add_argument("--poll", type=int, default=15)
+    wait_ci.add_argument("--execute", action="store_true")
+
+    parse_artifacts = sub.add_parser("parse-artifacts", help="Parse local JSON/SARIF security report artifacts")
+    parse_artifacts.add_argument("paths", nargs="+")
 
     regression = sub.add_parser("regression", help="Investigate root cause and generate remediation/test PR plan")
     regression.add_argument("--provider", default="fixture", choices=["fixture", "gitlab", "github"])
@@ -158,14 +177,42 @@ def main() -> None:
         )
     elif args.command == "scanner-chaos":
         result = engines.scanner_chaos.run(
-            ScannerChaosRequest(provider=args.provider, repo=args.repo, dry_run=not args.execute)
+            ScannerChaosRequest(
+                provider=args.provider,
+                repo=args.repo,
+                dry_run=not args.execute,
+                wait_for_ci=args.wait_for_ci,
+                timeout_seconds=args.timeout,
+                poll_seconds=args.poll,
+            )
         )
         print(json.dumps(result, indent=2))
     elif args.command == "policy-audit":
         result = engines.policy_audit.audit(
-            PolicyAuditRequest(provider=args.provider, repo=args.repo, dry_run=not args.execute)
+            PolicyAuditRequest(
+                provider=args.provider,
+                repo=args.repo,
+                default_branch=args.default_branch,
+                dry_run=not args.execute,
+            )
         )
         print(json.dumps(result, indent=2))
+    elif args.command == "wait-ci":
+        request = CiWaitRequest(
+            provider=args.provider,
+            repo=args.repo,
+            ref=args.ref,
+            timeout_seconds=args.timeout,
+            poll_seconds=args.poll,
+            dry_run=not args.execute,
+        )
+        ops = ProviderOps(request)
+        ci = ops.wait_for_ci(request.ref, request.timeout_seconds, request.poll_seconds)
+        artifacts = ops.download_ci_artifacts(ci)
+        print(json.dumps({"ci": ci, "artifact_count": len(artifacts), "findings": parse_security_artifacts(artifacts)}, indent=2))
+    elif args.command == "parse-artifacts":
+        artifacts = {path: Path(path).read_bytes() for path in args.paths}
+        print(json.dumps({"findings": parse_security_artifacts(artifacts)}, indent=2))
     elif args.command == "regression":
         result = engines.regression.investigate(
             RegressionRequest(

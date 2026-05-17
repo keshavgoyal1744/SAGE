@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from base64 import b64decode
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -17,6 +18,7 @@ from .models import (
     FixtureImportRequest,
     IncidentInput,
     CiOptimizeRequest,
+    CiWaitRequest,
     MemoryAskRequest,
     MemorySyncRequest,
     MergeRequestInput,
@@ -28,10 +30,13 @@ from .models import (
     ReputationFeedbackInput,
     RuntimeEventInput,
     ScannerChaosRequest,
+    ScanArtifactParseRequest,
     SchedulerJobInput,
     SourceImportRequest,
 )
 from .sarif import findings_to_sarif
+from .scan_reports import parse_security_artifacts
+from .provider_ops import ProviderOps
 from .source_control import (
     HistoryImporter,
     ProviderError,
@@ -154,6 +159,33 @@ def scanner_chaos(item: ScannerChaosRequest) -> dict:
 @app.post("/security/policy-audit")
 def policy_audit(item: PolicyAuditRequest) -> dict:
     return engines.policy_audit.audit(item)
+
+
+@app.post("/security/wait-ci")
+def wait_ci(item: CiWaitRequest) -> dict:
+    ops = ProviderOps(item)
+    ci = ops.wait_for_ci(item.ref, item.timeout_seconds, item.poll_seconds)
+    artifacts = ops.download_ci_artifacts(ci)
+    return {
+        "ci": ci,
+        "artifact_count": len(artifacts),
+        "findings": parse_security_artifacts(artifacts),
+    }
+
+
+@app.post("/security/parse-artifacts")
+def parse_artifacts(item: ScanArtifactParseRequest) -> dict:
+    artifacts = {}
+    for artifact in item.artifacts:
+        if artifact.encoding == "base64":
+            try:
+                artifacts[artifact.filename] = b64decode(artifact.content)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid base64 artifact {artifact.filename}") from exc
+        else:
+            artifacts[artifact.filename] = artifact.content
+    findings = parse_security_artifacts(artifacts)
+    return {"findings": findings, "count": len(findings)}
 
 
 @app.get("/controls/context")
