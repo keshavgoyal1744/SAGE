@@ -9,7 +9,18 @@ from pathlib import Path
 
 from .demo import load_demo
 from .factory import build_engines
-from .models import FixtureImportRequest, MergeRequestInput, SourceImportRequest
+from .models import (
+    CiOptimizeRequest,
+    FixtureImportRequest,
+    MemoryAskRequest,
+    MemorySyncRequest,
+    MergeRequestInput,
+    PolicyAuditRequest,
+    RegressionRequest,
+    ReputationFeedbackInput,
+    ScannerChaosRequest,
+    SourceImportRequest,
+)
 from .sarif import findings_to_sarif
 from .source_control import HistoryImporter, ProviderError
 
@@ -43,6 +54,48 @@ def main() -> None:
     sarif.add_argument("--repo", default=None)
 
     sub.add_parser("dashboard", help="Print dashboard JSON")
+
+    scanner = sub.add_parser("scanner-chaos", help="Plan or run scanner validation payload workflow")
+    scanner.add_argument("--provider", default="fixture", choices=["fixture", "gitlab", "github"])
+    scanner.add_argument("--repo", required=True)
+    scanner.add_argument("--execute", action="store_true")
+
+    audit = sub.add_parser("policy-audit", help="Audit repository security policy settings")
+    audit.add_argument("--provider", default="fixture", choices=["fixture", "gitlab", "github"])
+    audit.add_argument("--repo", required=True)
+    audit.add_argument("--execute", action="store_true")
+
+    regression = sub.add_parser("regression", help="Investigate root cause and generate remediation/test PR plan")
+    regression.add_argument("--provider", default="fixture", choices=["fixture", "gitlab", "github"])
+    regression.add_argument("--repo", required=True)
+    regression.add_argument("--incident-id", default=None)
+    regression.add_argument("--finding-id", default=None)
+    regression.add_argument("--execute", action="store_true")
+
+    ci = sub.add_parser("optimize-ci", help="Create optimized CI workflow plan")
+    ci.add_argument("--provider", default="fixture", choices=["fixture", "gitlab", "github"])
+    ci.add_argument("--repo", required=True)
+    ci.add_argument("--execute", action="store_true")
+
+    ask = sub.add_parser("ask", help="Ask security memory")
+    ask.add_argument("question")
+    ask.add_argument("--repo", default=None)
+
+    sub.add_parser("validate-memory", help="Validate security memory")
+    sub.add_parser("memory-dashboard-html", help="Print memory dashboard HTML")
+
+    sync = sub.add_parser("sync-memory", help="Plan or run memory sync")
+    sync.add_argument("--provider", default="fixture", choices=["fixture", "gitlab", "github"])
+    sync.add_argument("--repo", required=True)
+    sync.add_argument("--execute", action="store_true")
+
+    rep_score = sub.add_parser("reputation-score", help="Score MR JSON with adaptive model")
+    rep_score.add_argument("path")
+
+    rep_feedback = sub.add_parser("reputation-feedback", help="Train adaptive model from outcome")
+    rep_feedback.add_argument("--repo", required=True)
+    rep_feedback.add_argument("--mr-id", required=True)
+    rep_feedback.add_argument("--outcome", required=True, choices=["merged", "closed", "abandoned"])
 
     args = parser.parse_args()
     engines = build_engines()
@@ -100,6 +153,55 @@ def main() -> None:
                     "incidents": engines.store.list_incidents()[:10],
                     "compliance_evidence": engines.store.list_compliance_evidence()[:10],
                 },
+                indent=2,
+            )
+        )
+    elif args.command == "scanner-chaos":
+        result = engines.scanner_chaos.run(
+            ScannerChaosRequest(provider=args.provider, repo=args.repo, dry_run=not args.execute)
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "policy-audit":
+        result = engines.policy_audit.audit(
+            PolicyAuditRequest(provider=args.provider, repo=args.repo, dry_run=not args.execute)
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "regression":
+        result = engines.regression.investigate(
+            RegressionRequest(
+                provider=args.provider,
+                repo=args.repo,
+                incident_id=args.incident_id,
+                finding_id=args.finding_id,
+                dry_run=not args.execute,
+            )
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "optimize-ci":
+        result = engines.ci_optimizer.optimize(
+            CiOptimizeRequest(provider=args.provider, repo=args.repo, dry_run=not args.execute)
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "ask":
+        print(json.dumps(engines.memory_suite.ask(MemoryAskRequest(question=args.question, repo=args.repo)), indent=2))
+    elif args.command == "validate-memory":
+        print(json.dumps(engines.memory_suite.validate(), indent=2))
+    elif args.command == "memory-dashboard-html":
+        print(engines.memory_suite.dashboard_html())
+    elif args.command == "sync-memory":
+        result = engines.memory_suite.sync(
+            MemorySyncRequest(provider=args.provider, repo=args.repo, dry_run=not args.execute)
+        )
+        print(json.dumps(result, indent=2))
+    elif args.command == "reputation-score":
+        data = json.loads(Path(args.path).read_text())
+        print(json.dumps(engines.reputation.score_mr(MergeRequestInput(**data)), indent=2))
+    elif args.command == "reputation-feedback":
+        print(
+            json.dumps(
+                engines.reputation.feedback(
+                    ReputationFeedbackInput(repo=args.repo, mr_id=args.mr_id, outcome=args.outcome)
+                ),
                 indent=2,
             )
         )

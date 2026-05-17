@@ -24,6 +24,14 @@ change -> graph context -> risk score -> control confidence -> runtime feedback
 - Incident replay timeline.
 - FastAPI server and CLI.
 - GitLab and GitHub history import with webhook endpoints for ongoing updates.
+- Provider writeback for comments, issues, branches, commits, and PR/MR creation.
+- Scanner chaos workflow that injects synthetic payloads into a branch.
+- Security policy audit with remediation issue creation.
+- Root-cause/sibling regression workflow with generated patch and test PR plans.
+- CI optimizer for GitLab CI and GitHub Actions.
+- Memory validation, sync pages, HTML dashboard, ask endpoint, onboarding, health, carbon, reply commands, and pattern rules.
+- Online adaptive reputation model with feedback training and checkpointing.
+- Incremental sync scheduler.
 
 ## Run Locally
 
@@ -83,6 +91,26 @@ POST /webhooks/github
 ```
 
 Set `SENTINELGRAPH_GITLAB_WEBHOOK_SECRET` or `SENTINELGRAPH_GITHUB_WEBHOOK_SECRET` to require signed/secret webhooks.
+
+Run production workflows in dry-run mode:
+
+```bash
+python3 -m sentinelgraph.cli scanner-chaos --repo my-org/my-repo
+python3 -m sentinelgraph.cli policy-audit --repo my-org/my-repo
+python3 -m sentinelgraph.cli regression --repo my-org/my-repo --incident-id incident_id
+python3 -m sentinelgraph.cli optimize-ci --repo my-org/my-repo
+python3 -m sentinelgraph.cli ask "what auth decisions govern gateway?"
+python3 -m sentinelgraph.cli validate-memory
+python3 -m sentinelgraph.cli reputation-score examples_mr.json
+```
+
+Add `--provider gitlab --execute` or `--provider github --execute` to mutate real repos. Use tokens through `GITLAB_TOKEN` or `GITHUB_TOKEN`.
+
+Deployment:
+
+```bash
+docker compose up --build
+```
 
 Analyze a merge request from JSON:
 

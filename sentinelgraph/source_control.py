@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hmac
 import os
+from base64 import b64encode
 from hashlib import sha256
-from typing import Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 from urllib.parse import quote
 
 import httpx
 
-from .factory import Engines
 from .models import (
     DecisionInput,
     MergeRequestInput,
@@ -20,6 +20,9 @@ from .models import (
     SourceImportResult,
 )
 from .utils import stable_id
+
+if TYPE_CHECKING:
+    from .factory import Engines
 
 
 DECISION_MARKERS = [
@@ -91,6 +94,104 @@ class GitLabClient:
             response = client.get(f"{self.base_url}/api/v4/projects/{project}/merge_requests/{mr_id}")
             response.raise_for_status()
             return self._fetch_one(client, project, repo, response.json())
+
+    def comment_on_change(self, repo: str, mr_id: str, body: str) -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.post(
+                f"{self.base_url}/api/v4/projects/{project}/merge_requests/{mr_id}/notes",
+                json={"body": body},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def create_issue(self, repo: str, title: str, body: str, labels: Optional[List[str]] = None) -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.post(
+                f"{self.base_url}/api/v4/projects/{project}/issues",
+                json={"title": title, "description": body, "labels": ",".join(labels or [])},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def create_branch(self, repo: str, branch: str, ref: str = "main") -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.post(
+                f"{self.base_url}/api/v4/projects/{project}/repository/branches",
+                json={"branch": branch, "ref": ref},
+            )
+            if response.status_code == 400 and "already exists" in response.text.lower():
+                return {"name": branch, "already_exists": True}
+            response.raise_for_status()
+            return response.json()
+
+    def commit_files(
+        self,
+        repo: str,
+        branch: str,
+        message: str,
+        files: Dict[str, str],
+    ) -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        actions = [
+            {"action": "update", "file_path": path, "content": content}
+            for path, content in files.items()
+        ]
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.post(
+                f"{self.base_url}/api/v4/projects/{project}/repository/commits",
+                json={"branch": branch, "commit_message": message, "actions": actions},
+            )
+            if response.status_code == 400 and "does not exist" in response.text.lower():
+                actions = [
+                    {"action": "create", "file_path": path, "content": content}
+                    for path, content in files.items()
+                ]
+                response = client.post(
+                    f"{self.base_url}/api/v4/projects/{project}/repository/commits",
+                    json={"branch": branch, "commit_message": message, "actions": actions},
+                )
+            response.raise_for_status()
+            return response.json()
+
+    def create_merge_request(self, repo: str, source_branch: str, target_branch: str, title: str, body: str) -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.post(
+                f"{self.base_url}/api/v4/projects/{project}/merge_requests",
+                json={
+                    "source_branch": source_branch,
+                    "target_branch": target_branch,
+                    "title": title,
+                    "description": body,
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def get_policy_status(self, repo: str) -> Dict[str, Any]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            protected = self._json_or_empty(client.get(f"{self.base_url}/api/v4/projects/{project}/protected_branches"))
+            approvals = self._json_or_empty(client.get(f"{self.base_url}/api/v4/projects/{project}/approvals"))
+            project_data = self._json_or_empty(client.get(f"{self.base_url}/api/v4/projects/{project}"))
+        return {
+            "protected_branches": bool(protected),
+            "approval_rules": bool(approvals),
+            "only_allow_merge_if_pipeline_succeeds": bool(project_data.get("only_allow_merge_if_pipeline_succeeds")),
+            "protected_environments": "unknown",
+        }
+
+    def get_security_findings(self, repo: str) -> List[Dict[str, Any]]:
+        project = quote(repo, safe="")
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(client.get(f"{self.base_url}/api/v4/projects/{project}/vulnerability_findings"))
+        return data if isinstance(data, list) else []
+
+    def _headers(self) -> Dict[str, str]:
+        return {"PRIVATE-TOKEN": self.token} if self.token else {}
 
     def _fetch_one(self, client: httpx.Client, project: str, repo: str, mr: Dict[str, Any]) -> SourceChangeRecord:
         iid = str(mr.get("iid") or mr.get("id"))
@@ -200,6 +301,85 @@ class GitHubClient:
             response = client.get(f"{self.base_url}/repos/{repo}/pulls/{pr_number}")
             response.raise_for_status()
             return self._fetch_one(client, repo, response.json())
+
+    def comment_on_change(self, repo: str, mr_id: str, body: str) -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.post(
+                f"{self.base_url}/repos/{repo}/issues/{mr_id}/comments",
+                json={"body": body},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def create_issue(self, repo: str, title: str, body: str, labels: Optional[List[str]] = None) -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.post(
+                f"{self.base_url}/repos/{repo}/issues",
+                json={"title": title, "body": body, "labels": labels or []},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def create_branch(self, repo: str, branch: str, ref: str = "main") -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            ref_response = client.get(f"{self.base_url}/repos/{repo}/git/ref/heads/{ref}")
+            ref_response.raise_for_status()
+            sha = ref_response.json()["object"]["sha"]
+            response = client.post(
+                f"{self.base_url}/repos/{repo}/git/refs",
+                json={"ref": f"refs/heads/{branch}", "sha": sha},
+            )
+            if response.status_code == 422 and "already_exists" in response.text.lower():
+                return {"ref": f"refs/heads/{branch}", "already_exists": True}
+            response.raise_for_status()
+            return response.json()
+
+    def commit_files(self, repo: str, branch: str, message: str, files: Dict[str, str]) -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            results = {}
+            for path, content in files.items():
+                existing = client.get(f"{self.base_url}/repos/{repo}/contents/{path}", params={"ref": branch})
+                payload = {"message": message, "content": _b64(content), "branch": branch}
+                if existing.status_code == 200:
+                    payload["sha"] = existing.json().get("sha")
+                response = client.put(f"{self.base_url}/repos/{repo}/contents/{path}", json=payload)
+                response.raise_for_status()
+                results[path] = response.json()
+        return {"files": results}
+
+    def create_merge_request(self, repo: str, source_branch: str, target_branch: str, title: str, body: str) -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            response = client.post(
+                f"{self.base_url}/repos/{repo}/pulls",
+                json={"head": source_branch, "base": target_branch, "title": title, "body": body},
+            )
+            response.raise_for_status()
+            return response.json()
+
+    def get_policy_status(self, repo: str) -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            branch = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}/branches/main/protection"))
+            repo_data = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}"))
+        return {
+            "protected_branches": bool(branch),
+            "approval_rules": bool(branch.get("required_pull_request_reviews")) if isinstance(branch, dict) else False,
+            "only_allow_merge_if_pipeline_succeeds": bool(branch.get("required_status_checks")) if isinstance(branch, dict) else False,
+            "protected_environments": bool(repo_data.get("has_projects")) if isinstance(repo_data, dict) else "unknown",
+        }
+
+    def get_security_findings(self, repo: str) -> List[Dict[str, Any]]:
+        with httpx.Client(timeout=30.0, headers=self._headers()) as client:
+            data = self._json_or_empty(client.get(f"{self.base_url}/repos/{repo}/code-scanning/alerts"))
+        return data if isinstance(data, list) else []
+
+    def _headers(self) -> Dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     def _fetch_one(self, client: httpx.Client, repo: str, pr: Dict[str, Any]) -> SourceChangeRecord:
         number = str(pr.get("number"))
@@ -526,3 +706,7 @@ def verify_gitlab_token(header_token: Optional[str], secret: Optional[str]) -> b
     if not header_token:
         return False
     return hmac.compare_digest(header_token, secret)
+
+
+def _b64(content: str) -> str:
+    return b64encode(content.encode("utf-8")).decode("ascii")

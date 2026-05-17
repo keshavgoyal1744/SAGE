@@ -1,0 +1,16 @@
+services:
+  sentinelgraph:
+    build: .
+    ports:
+      - "8088:8088"
+    environment:
+      SENTINELGRAPH_DB: /data/sentinelgraph.db
+      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      SENTINELGRAPH_GITLAB_WEBHOOK_SECRET: ${SENTINELGRAPH_GITLAB_WEBHOOK_SECRET:-}
+      SENTINELGRAPH_GITHUB_WEBHOOK_SECRET: ${SENTINELGRAPH_GITHUB_WEBHOOK_SECRET:-}
+    volumes:
+      - sentinelgraph-data:/data
+
+volumes:
+  sentinelgraph-data:

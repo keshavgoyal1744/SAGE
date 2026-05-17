@@ -1,6 +1,7 @@
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/reputation_model.json
 __pycache__/
 .pytest_cache/
 *.pyc

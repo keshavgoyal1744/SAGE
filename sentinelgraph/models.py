@@ -137,6 +137,84 @@ class SourceImportResult(BaseModel):
     analyses: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class ProviderTarget(BaseModel):
+    provider: Literal["gitlab", "github", "fixture"] = "fixture"
+    repo: str
+    token: Optional[str] = None
+    token_env: Optional[str] = None
+    base_url: Optional[str] = None
+    dry_run: bool = True
+
+
+class WritebackAction(BaseModel):
+    action: str
+    provider: str
+    repo: str
+    status: Literal["planned", "created", "skipped", "failed"]
+    url: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+
+
+class ScannerChaosRequest(ProviderTarget):
+    branch: str = "sentinelgraph/scanner-chaos"
+    open_merge_request: bool = True
+    payload_categories: List[str] = Field(default_factory=list)
+
+
+class PolicyAuditRequest(ProviderTarget):
+    default_branch: str = "main"
+    open_remediation: bool = True
+
+
+class RegressionRequest(ProviderTarget):
+    incident_id: Optional[str] = None
+    finding_id: Optional[str] = None
+    open_remediation: bool = True
+    open_tests: bool = True
+
+
+class CiOptimizeRequest(ProviderTarget):
+    ci_path: str = ".gitlab-ci.yml"
+    workflow_path: str = ".github/workflows/ci.yml"
+    branch: str = "sentinelgraph/optimize-ci"
+
+
+class MemorySyncRequest(ProviderTarget):
+    mode: Literal["pull", "push", "both"] = "both"
+
+
+class MemoryAskRequest(BaseModel):
+    question: str
+    repo: Optional[str] = None
+    limit: int = 8
+
+
+class ReplyCommandInput(BaseModel):
+    repo: str
+    decision_id: str
+    command: Literal["intentional", "accidental", "discuss"]
+    reasoning: str = ""
+    actor: str = "unknown"
+
+
+class ReputationFeedbackInput(BaseModel):
+    repo: str
+    mr_id: str
+    outcome: Literal["merged", "closed", "abandoned"]
+    features: Optional[Dict[str, Any]] = None
+
+
+class SchedulerJobInput(BaseModel):
+    job_id: str
+    provider: Literal["gitlab", "github"]
+    repo: str
+    interval_seconds: int = 3600
+    token_env: Optional[str] = None
+    limit: int = 100
+    enabled: bool = True
+
+
 class RuntimeEventInput(BaseModel):
     event_id: str
     source: str

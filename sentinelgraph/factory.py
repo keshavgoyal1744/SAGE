@@ -8,10 +8,14 @@ from .findings import FindingEngine
 from .graph import SecurityGraph
 from .incident import IncidentEngine
 from .memory import MemoryEngine
+from .memory_suite import MemorySuite
 from .policy import PolicyEngine
+from .regression import CiOptimizer, RegressionEngine
+from .reputation import ReputationEngine
 from .replay import ReplayEngine
 from .risk import RiskEngine
 from .runtime import RuntimeEngine
+from .security_audit import ScannerChaosEngine, SecurityPolicyAuditor
 from .storage import Store
 from .supply_chain import SupplyChainEngine
 
@@ -21,6 +25,7 @@ class Engines:
         self.store = store
         self.graph = SecurityGraph(store)
         self.memory = MemoryEngine(self.graph)
+        self.memory_suite = MemorySuite(self.graph)
         self.controls = ControlEngine(self.graph)
         self.runtime = RuntimeEngine(self.graph)
         self.findings = FindingEngine(self.graph)
@@ -30,6 +35,11 @@ class Engines:
         self.policy = PolicyEngine(self.graph, self.controls)
         self.incidents = IncidentEngine(self.graph, self.controls, self.findings, self.compliance)
         self.replay = ReplayEngine(self.graph)
+        self.scanner_chaos = ScannerChaosEngine(self.controls)
+        self.policy_audit = SecurityPolicyAuditor()
+        self.regression = RegressionEngine(self.graph, self.findings)
+        self.ci_optimizer = CiOptimizer()
+        self.reputation = ReputationEngine(store)
 
 
 def build_engines(store: Store | None = None) -> Engines:

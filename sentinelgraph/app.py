@@ -6,6 +6,7 @@ import os
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse
 
 from .demo import load_demo
 from .factory import build_engines
@@ -15,10 +16,19 @@ from .models import (
     FindingInput,
     FixtureImportRequest,
     IncidentInput,
+    CiOptimizeRequest,
+    MemoryAskRequest,
+    MemorySyncRequest,
     MergeRequestInput,
     PackageInput,
     PolicyEvaluationInput,
+    PolicyAuditRequest,
+    RegressionRequest,
+    ReplyCommandInput,
+    ReputationFeedbackInput,
     RuntimeEventInput,
+    ScannerChaosRequest,
+    SchedulerJobInput,
     SourceImportRequest,
 )
 from .sarif import findings_to_sarif
@@ -28,9 +38,11 @@ from .source_control import (
     verify_github_signature,
     verify_gitlab_token,
 )
+from .scheduler import IncrementalScheduler
 
 engines = build_engines()
 history_importer = HistoryImporter(engines)
+scheduler = IncrementalScheduler(history_importer)
 
 app = FastAPI(
     title="SentinelGraph",
@@ -134,6 +146,16 @@ def run_control_validation(item: ControlRunInput) -> dict:
     return engines.controls.record_run(item).model_dump()
 
 
+@app.post("/controls/scanner-chaos")
+def scanner_chaos(item: ScannerChaosRequest) -> dict:
+    return engines.scanner_chaos.run(item)
+
+
+@app.post("/security/policy-audit")
+def policy_audit(item: PolicyAuditRequest) -> dict:
+    return engines.policy_audit.audit(item)
+
+
 @app.get("/controls/context")
 def control_context(repo: str) -> dict:
     return engines.controls.latest_context(repo)
@@ -161,6 +183,16 @@ def create_incident(item: IncidentInput) -> dict:
     return engines.incidents.create_incident(item)
 
 
+@app.post("/regression/investigate")
+def regression_investigate(item: RegressionRequest) -> dict:
+    return engines.regression.investigate(item)
+
+
+@app.post("/ci/optimize")
+def ci_optimize(item: CiOptimizeRequest) -> dict:
+    return engines.ci_optimizer.optimize(item)
+
+
 @app.get("/incidents")
 def list_incidents(repo: Optional[str] = None) -> list[dict]:
     return engines.store.list_incidents(repo)
@@ -182,6 +214,90 @@ def evaluate_policy(item: PolicyEvaluationInput) -> dict:
 @app.get("/policies/rego")
 def rego_template() -> dict:
     return {"rego": engines.policy.rego_template()}
+
+
+@app.get("/memory/validate")
+def memory_validate() -> dict:
+    return engines.memory_suite.validate()
+
+
+@app.post("/memory/sync")
+def memory_sync(item: MemorySyncRequest) -> dict:
+    return engines.memory_suite.sync(item)
+
+
+@app.post("/memory/ask")
+def memory_ask(item: MemoryAskRequest) -> dict:
+    return engines.memory_suite.ask(item)
+
+
+@app.get("/memory/dashboard.html", response_class=HTMLResponse)
+def memory_dashboard_html() -> str:
+    return engines.memory_suite.dashboard_html()
+
+
+@app.get("/memory/onboarding")
+def memory_onboarding(repo: str) -> dict:
+    return engines.memory_suite.onboarding(repo)
+
+
+@app.get("/memory/health")
+def memory_health(repo: Optional[str] = None) -> dict:
+    return engines.memory_suite.health(repo)
+
+
+@app.post("/memory/reply")
+def memory_reply(item: ReplyCommandInput) -> dict:
+    return engines.memory_suite.reply(item)
+
+
+@app.get("/memory/pattern-rules")
+def memory_pattern_rules() -> dict:
+    return engines.memory_suite.pattern_rules()
+
+
+@app.post("/reputation/score")
+def reputation_score(item: MergeRequestInput) -> dict:
+    return engines.reputation.score_mr(item)
+
+
+@app.post("/reputation/feedback")
+def reputation_feedback(item: ReputationFeedbackInput) -> dict:
+    return engines.reputation.feedback(item)
+
+
+@app.get("/reputation/users")
+def reputation_users(repo: Optional[str] = None) -> dict:
+    return engines.reputation.user_reputation(repo)
+
+
+@app.post("/reputation/checkpoint")
+def reputation_checkpoint() -> dict:
+    return engines.reputation.checkpoint()
+
+
+@app.post("/scheduler/jobs")
+def scheduler_add_job(item: SchedulerJobInput) -> dict:
+    return scheduler.add_job(item)
+
+
+@app.post("/scheduler/jobs/{job_id}/run")
+def scheduler_run_once(job_id: str) -> dict:
+    if job_id not in scheduler.jobs:
+        raise HTTPException(status_code=404, detail="Scheduler job not found")
+    return scheduler.run_once(job_id)
+
+
+@app.post("/scheduler/jobs/{job_id}/start")
+def scheduler_start(job_id: str) -> dict:
+    if job_id not in scheduler.jobs:
+        raise HTTPException(status_code=404, detail="Scheduler job not found")
+    return scheduler.start(job_id)
+
+
+@app.get("/scheduler/status")
+def scheduler_status() -> dict:
+    return scheduler.status()
 
 
 @app.get("/sarif")
