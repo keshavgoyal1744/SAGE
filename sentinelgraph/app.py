@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 
 from .demo import load_demo
 from .factory import build_engines
@@ -12,15 +13,24 @@ from .models import (
     ControlRunInput,
     DecisionInput,
     FindingInput,
+    FixtureImportRequest,
     IncidentInput,
     MergeRequestInput,
     PackageInput,
     PolicyEvaluationInput,
     RuntimeEventInput,
+    SourceImportRequest,
 )
 from .sarif import findings_to_sarif
+from .source_control import (
+    HistoryImporter,
+    ProviderError,
+    verify_github_signature,
+    verify_gitlab_token,
+)
 
 engines = build_engines()
+history_importer = HistoryImporter(engines)
 
 app = FastAPI(
     title="SentinelGraph",
@@ -37,6 +47,43 @@ def health() -> dict:
 @app.post("/demo/reset")
 def demo_reset() -> dict:
     return load_demo(engines)
+
+
+@app.post("/integrations/import")
+def import_history(item: SourceImportRequest) -> dict:
+    try:
+        return history_importer.import_from_request(item).model_dump()
+    except ProviderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Provider import failed: {exc}")
+
+
+@app.post("/integrations/import-records")
+def import_records(item: FixtureImportRequest) -> dict:
+    return history_importer.import_records(
+        item.records,
+        import_decisions=item.import_decisions,
+        analyze=item.analyze,
+    ).model_dump()
+
+
+@app.post("/webhooks/gitlab")
+async def gitlab_webhook(request: Request) -> dict:
+    body = await request.json()
+    secret = os.environ.get("SENTINELGRAPH_GITLAB_WEBHOOK_SECRET")
+    if not verify_gitlab_token(request.headers.get("X-Gitlab-Token"), secret):
+        raise HTTPException(status_code=401, detail="Invalid webhook token")
+    return history_importer.import_webhook("gitlab", body).model_dump()
+
+
+@app.post("/webhooks/github")
+async def github_webhook(request: Request) -> dict:
+    body_bytes = await request.body()
+    secret = os.environ.get("SENTINELGRAPH_GITHUB_WEBHOOK_SECRET")
+    if not verify_github_signature(body_bytes, request.headers.get("X-Hub-Signature-256"), secret):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    return history_importer.import_webhook("github", await request.json()).model_dump()
 
 
 @app.get("/dashboard")

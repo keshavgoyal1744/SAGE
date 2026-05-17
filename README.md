@@ -23,6 +23,7 @@ change -> graph context -> risk score -> control confidence -> runtime feedback
 - Policy evaluation plus an OPA/Rego starter template.
 - Incident replay timeline.
 - FastAPI server and CLI.
+- GitLab and GitHub history import with webhook endpoints for ongoing updates.
 
 ## Run Locally
 
@@ -47,6 +48,41 @@ curl http://127.0.0.1:8088/sarif?repo=payments-platform
 curl "http://127.0.0.1:8088/graph/search?q=auth+bypass+gateway&types=incident,finding,decision"
 curl http://127.0.0.1:8088/policies/rego
 ```
+
+Import real merge request history:
+
+```bash
+# GitLab: repo is group/project. Uses GITLAB_TOKEN when available.
+python3 -m sentinelgraph.cli import-history --provider gitlab --repo my-group/my-project --limit 0
+
+# GitHub: repo is owner/repo. Uses GITHUB_TOKEN when available.
+python3 -m sentinelgraph.cli import-history --provider github --repo my-org/my-repo --limit 0
+```
+
+API import:
+
+```bash
+curl -X POST http://127.0.0.1:8088/integrations/import \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"github","repo":"my-org/my-repo","token_env":"GITHUB_TOKEN","limit":0}'
+```
+
+Use `limit: 0` to backfill all available pages.
+
+Offline fixture import uses the same normalization and analysis pipeline:
+
+```bash
+python3 -m sentinelgraph.cli import-fixture data/source_history_fixture.json
+```
+
+Webhook endpoints:
+
+```text
+POST /webhooks/gitlab
+POST /webhooks/github
+```
+
+Set `SENTINELGRAPH_GITLAB_WEBHOOK_SECRET` or `SENTINELGRAPH_GITHUB_WEBHOOK_SECRET` to require signed/secret webhooks.
 
 Analyze a merge request from JSON:
 
